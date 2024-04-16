@@ -37,20 +37,20 @@ To give us the deliverables you will have to commit the following files to your 
 - ✅ The jupyter notebook: `a3_notebook.ipynb`
 
 - ✅ The python files:
-    - [ ] `a3_utils.py`, if you added any helper functions
-    - [ ] `a3_decoding.py`
-    - [ ] `a3_sampling.py`
-    - [ ] `a3_contrastive_decoding.py`
-    - [ ] `a3_contrastive_main.py`
-    - [ ] `a3_mt_eval.py`
+    - [x] `a3_utils.py`, if you added any helper functions
+    - [x] `a3_decoding.py`
+    - [x] `a3_sampling.py`
+    - [x] `a3_contrastive_decoding.py`
+    - [x] `a3_contrastive_main.py`
+    - [x] `a3_mt_eval.py`
 
 - ✅ The Part 3 open answer MD file: `a3_mt_qa.md`
 
 - ✅ The JSON files generated in Parts 2 & 3: 
-    - [ ] `part2_contrastive_generations.json`
-    - [ ] `part2_greedy_generations.json`
-    - [ ] `part3_metrics.json` 
-    - [ ] `part3_corr.json`
+    - [x] `part2_contrastive_generations.json`
+    - [x] `part2_greedy_generations.json`
+    - [x] `part3_metrics.json` 
+    - [x] `part3_corr.json`
 
 ### Expected Workload & Resources
 
