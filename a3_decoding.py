@@ -1,7 +1,8 @@
 import torch
 from typing import Any, Dict
 from a3_utils import *
-
+import copy
+import torch.nn.functional as F
 
 class GreedySearchDecoderForCausalLM(GeneratorForCausalLM):
     ###########################################################################
@@ -15,7 +16,6 @@ class GreedySearchDecoderForCausalLM(GeneratorForCausalLM):
         Inherits variables and helper functions from GeneratorForCausalLM.
         """
         super().__init__(model, tokenizer)
-    
     @torch.no_grad()
     def search(
         self,
@@ -94,8 +94,18 @@ class GreedySearchDecoderForCausalLM(GeneratorForCausalLM):
         #   more readable. There isn't a unique solution for this so use it as you wish
         #   or create another function in this super class.
         ########################################################################
-
-        pass
+        temp_inputs = copy.deepcopy(inputs)
+        generated_sequence = inputs['input_ids'].tolist()[0]
+        for _ in range(max_new_tokens):
+            with torch.no_grad():
+                outputs = self.model(**temp_inputs)
+                logits = outputs.logits
+            next_token = torch.argmax(logits[:, -1, :], dim=-1)
+            temp_inputs = self.prepare_next_inputs(temp_inputs, next_token)
+            generated_sequence.append(next_token.item())
+            if next_token.item() == self.tokenizer.eos_token_id:
+                break
+        return torch.LongTensor([generated_sequence]).to(self.model.device)
 
 
 class BeamSearchDecoderForCausalLM(GeneratorForCausalLM):
@@ -178,8 +188,120 @@ class BeamSearchDecoderForCausalLM(GeneratorForCausalLM):
         #
         # For hints, read the todo statement in GreedySearchDecoderForCausalLM.
         ########################################################################
-        pass
+        input_ids = inputs['input_ids']
+        original_input_length = input_ids.size(1)
+        input_ids = input_ids.expand(num_beams, -1).to(self.model.device)
 
+        all_candidates = []
+        worst_score = 0.0
+
+        beam_scores = torch.zeros((num_beams)).to(input_ids.device)
+        # to break the ties in the first iteration
+        beam_scores[1:] = -1e7
+
+        for _ in range(max_new_tokens):
+            all_beam_scores, all_beam_next_tokens = self._get_next_beams(input_ids, num_beams, beam_scores)
+            current_seqs = []
+            for rank, (beam_score, whole_token_id) in enumerate(zip(all_beam_scores[0], all_beam_next_tokens[0])):
+                
+                # since I flatten all the beams, I first get actual beam index
+                beam_idx = whole_token_id // self.model.config.vocab_size
+                token_id = whole_token_id % self.model.config.vocab_size
+                if token_id.item() == self.eos_token_id:
+                    # print('EOS token reached')
+                    is_not_better_beam = rank >= num_beams
+                    if is_not_better_beam:
+                        continue
+                    actual_score = beam_score.item() / ((input_ids[beam_idx].size(0) - original_input_length) ** length_penalty)
+                    if len(all_candidates) < num_beams or actual_score > worst_score:
+                        new_beam = {
+                            'input_ids': input_ids[beam_idx].clone(),
+                            'score': actual_score
+                        }
+                        all_candidates.append(new_beam)
+
+                        if(len(all_candidates) > num_beams):
+                            sorted_candidate_scores = sorted((x['score'], idx) for idx, x in enumerate(all_candidates))
+                            all_candidates.pop(sorted_candidate_scores[0][1])
+                            worst_score = sorted_candidate_scores[1][0]
+                        else:
+                            worst_score = actual_score if actual_score < worst_score else worst_score
+                else:
+                    current_seqs.append({ 'beam_idx': beam_idx, 'token_id': token_id, 'beam_score': beam_score })      
+
+                # once we have all the beams filled, we will break the loop
+                if len(current_seqs) == num_beams:
+                    break
+            
+            current_score = all_beam_scores[0].max().item() / ((input_ids.size(1) + 1 - original_input_length) ** length_penalty)
+
+            # check if we have enough candidates to select from and we are sure that the remaining beams will not be better
+            if len(all_candidates) >= num_beams and current_score < worst_score:
+                break
+
+            beam_scores = beam_scores.new_tensor([x['beam_score'] for x in current_seqs])
+            beam_tokens = input_ids.new_tensor([x['token_id'] for x in current_seqs])
+            beam_indices = input_ids.new_tensor([x['beam_idx'] for x in current_seqs])
+            input_ids = input_ids[beam_indices]
+            input_ids = torch.cat([input_ids, beam_tokens.unsqueeze(1)], dim=-1)
+            # I am checking if all the beams have reached the end of the sentence (early stopping)
+            is_all_finished = True
+            for token in all_beam_next_tokens[0]:
+                if token != self.eos_token_id:
+                    is_all_finished = False
+                    break
+            if is_all_finished:
+                break
+
+        # I added remaining beams to the candidates if beams are not filled
+        if len(all_candidates) < num_beams:
+            for beam_idx in range(num_beams):
+                final_score = beam_scores[beam_idx].item()
+                final_tokens = input_ids[beam_idx]
+                
+                actual_final_score = final_score / ((final_tokens.size(0) - original_input_length) ** length_penalty)
+                if len(all_candidates) < num_beams or actual_final_score > worst_score:
+                    new_beam = {
+                        'input_ids': final_tokens.clone(),
+                        'score': actual_final_score
+                    }
+                    all_candidates.append(new_beam)
+
+                    if(len(all_candidates) > num_beams):
+                        sorted_candidate_scores = sorted((x['score'], idx) for idx, x in enumerate(all_candidates))
+                        all_candidates.pop(sorted_candidate_scores[0][1])
+                        worst_score = sorted_candidate_scores[1][0]
+                    else:
+                        worst_score = actual_final_score if actual_final_score < worst_score else worst_score
+
+        sequences = [beam['input_ids'] for beam in all_candidates[:num_return_sequences]]
+        padded_sequences = self._pad_sequences(sequences)
+
+        return {
+            'sequences': torch.LongTensor(padded_sequences).squeeze(1).to(input_ids.device),
+            'sequences_scores': [beam['score'] for beam in all_candidates[:num_return_sequences]]
+        }
+
+    def _get_next_beams(self, input_ids, num_beams=1, beam_scores=None):
+        attention_mask = torch.ones(input_ids.size()).to(self.model.device)
+        with torch.no_grad():
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+        next_token_logits = logits[:, -1, :]
+        next_token_log_probs = F.log_softmax(next_token_logits, dim=-1)
+        next_token_log_probs = next_token_log_probs + beam_scores[:, None]
+        next_token_log_probs = next_token_log_probs.view(1, -1)
+
+        # the reason that I used 2 * num_beams is that we want to have enough candidates to select from
+        # if some of them are not valid due to reaching the end of the sentence (early stopping), worst case scenario is that
+        # we will have num_beams end_of_sentence candidates, so we will have num_beams valid candidates to select from
+        top_k_log_probs, top_k_tokens = torch.topk(next_token_log_probs, k=2*num_beams, dim=-1)
+        return top_k_log_probs, top_k_tokens
+
+    def _pad_sequences(self, sequences):
+        max_len = max([len(seq) for seq in sequences])
+        padded_sequences = [list(seq) + [self.pad_token_id] * (max_len - len(seq)) for seq in sequences]
+        return padded_sequences
 
 def main():
     ############################################################################

@@ -1,6 +1,7 @@
 import torch
 from typing import Any, Dict
 from a3_utils import *
+import copy
 
 
 class TopKSamplerForCausalLM(GeneratorForCausalLM):
@@ -65,8 +66,23 @@ class TopKSamplerForCausalLM(GeneratorForCausalLM):
         #
         # For hints, read the todo statement in GreedySearchDecoderForCausalLM.
         ########################################################################
-        
-        pass
+        temp_inputs = copy.deepcopy(inputs)
+        generated_sequence = inputs['input_ids'].tolist()[0]
+        for _ in range(max_new_tokens):
+            with torch.no_grad():
+                outputs = self.model(**temp_inputs)
+                logits = outputs.logits
+            next_token_logits = logits[:, -1, :]
+            next_token_probs = torch.softmax(next_token_logits / temperature, dim=-1)
+            # Here we get the top k probabilities and indices
+            next_token_probs, next_token_indices = torch.topk(next_token_probs, top_k)
+            # Then we sample from the top k probabilities based on weighted probabilities
+            next_token = next_token_indices[0][torch.multinomial(next_token_probs, 1)[0]]
+            temp_inputs = self.prepare_next_inputs(temp_inputs, next_token)
+            generated_sequence.append(next_token.item())
+            if next_token.item() == self.tokenizer.eos_token_id:
+                break
+        return torch.LongTensor([generated_sequence]).to(self.model.device)
 
 
 class TopPSamplerForCausalLM(GeneratorForCausalLM):
@@ -134,8 +150,32 @@ class TopPSamplerForCausalLM(GeneratorForCausalLM):
         #
         # For hints, read the todo statement in GreedySearchDecoderForCausalLM.
         ########################################################################
-        
-        pass
+        temp_inputs = copy.deepcopy(inputs)
+        generated_sequence = inputs['input_ids'].tolist()[0]
+        for _ in range(max_new_tokens):
+            with torch.no_grad():
+                outputs = self.model(**temp_inputs)
+                logits = outputs.logits
+            next_token_logits = logits[:, -1, :]
+            next_token_probs = torch.softmax(next_token_logits / temperature, dim=-1)
+            next_token = self._top_p_sampling(next_token_probs, top_p)
+            temp_inputs = self.prepare_next_inputs(temp_inputs, next_token)
+            generated_sequence.append(next_token.item())
+            if next_token.item() == self.tokenizer.eos_token_id:
+                break
+        return torch.LongTensor([generated_sequence]).to(self.model.device)
+    
+    def _top_p_sampling(self, next_token_probs, top_p):
+        sorted_probs, sorted_indices = torch.sort(next_token_probs, descending=True)
+        for i in range(1, len(sorted_probs[0])):
+            if torch.sum(sorted_probs[0][:i]) > top_p:
+                sorted_probs = sorted_probs[:,:i]
+                break
+        next_token_indices = torch.multinomial(sorted_probs, 1)[0]
+        next_token = sorted_indices[0][next_token_indices.item()].unsqueeze(0)
+        return next_token
+
+
 
 
 def main():

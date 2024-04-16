@@ -2,6 +2,7 @@ from typing import Optional
 
 import torch 
 import numpy as np
+import torch.nn.functional as F
 
 from transformers.utils import logging
 
@@ -30,7 +31,17 @@ def filter_using_adaptive_plausibility_constraint(
         It calculates an adaptive plausibility threshold based on the maximum probability of tokens in each batch and the specified alpha value.
         The tokens with scores below this threshold are replaced with `filter_value`.
     """
-    # TODO: implement this function 
+    # TODO: implement this function
+    scores = F.softmax(scores, dim=-1)
+    max_scores, _ = torch.max(scores, dim=-1)
+    threshold = max_scores * alpha
+
+    # to ensure that at least min_tokens_to_keep tokens are kept
+    if min_tokens_to_keep > (scores > threshold).sum().item():
+        sorted_scores, _ = torch.sort(scores, descending=True)
+        threshold = sorted_scores[:, min_tokens_to_keep - 1]
+        
+    scores_normalized = torch.where(scores < threshold, filter_value, scores.log())
 
     return scores_normalized 
 
@@ -83,17 +94,17 @@ def greedy_search_with_contrastive_decoding(
         model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
         # TODO: forward pass to get the next token distribution using the expert model            
-        outputs = ...
-        next_token_logits = ...
+        outputs = model(**model_inputs)
+        next_token_logits = outputs.logits[:, -1, :]
 
         model_inputs_amateur =  amateur_model.prepare_inputs_for_generation(input_ids)
         
         # TODO: forward pass to get the next token distribution using the amateur model            
-        outputs_amateur = ...
-        next_token_logits_amateur = ...
+        outputs_amateur = amateur_model(**model_inputs_amateur)
+        next_token_logits_amateur = outputs_amateur.logits[:, -1, :]
 
         # TODO: normalize the token distribution by taking the log softmax using the amateur_temperature 
-        next_token_logits_amateur = ...
+        next_token_logits_amateur = F.log_softmax(next_token_logits_amateur / amateur_temperature, dim=-1)
 
         next_tokens_scores = filter_using_adaptive_plausibility_constraint(
             next_token_logits,
@@ -103,11 +114,11 @@ def greedy_search_with_contrastive_decoding(
         # TODO: contrast the next_tokens_scores (that you get after filtering)
         #       with the next token scores of the amateur model.
         #       Hint: reread Section 3.3 of the paper if it's not clear how!
-        next_tokens_scores = ...
+        next_tokens_scores = next_tokens_scores - next_token_logits_amateur
 
         # TODO: take the argmax to predict the next token then add it to the input_ids 
-        next_tokens = ...
-        input_ids = ...
+        next_tokens = torch.argmax(next_tokens_scores, dim=-1)
+        input_ids = torch.cat([input_ids, next_tokens.unsqueeze(-1)], dim=-1)
 
         model_kwargs = model._update_model_kwargs_for_generation(
             outputs, model_kwargs, is_encoder_decoder=model.config.is_encoder_decoder

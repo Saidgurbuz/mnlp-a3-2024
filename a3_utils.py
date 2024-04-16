@@ -110,8 +110,16 @@ class GeneratorForCausalLM():
         Returns:
             dict: the next model input dictionary
         """
-        
-        pass
+        if use_cache:
+            model_inputs["input_ids"] = new_token_id[:, None]
+            model_inputs["past_key_values"] = returned_past_key_values
+            model_inputs["attention_mask"] = torch.ones_like(model_inputs["input_ids"])
+        else:
+            model_inputs["input_ids"] = torch.cat([model_inputs["input_ids"], new_token_id[:, None]], dim=-1)
+            model_inputs["attention_mask"] = torch.cat(
+            [model_inputs["attention_mask"], torch.ones_like(new_token_id[:, None]) if new_token_id.item() != self.pad_token_id else torch.zeros_like(new_token_id[:, None])], dim=-1)
+
+        return model_inputs
 
 
 def load_seed(seed : int):
